@@ -2,134 +2,229 @@
 
 ## Forensic Deepfake Detection Tool
 
-Analyzes video for visual manipulation, audio artifacts, and scam indicators.
-Outputs annotated video with frame-by-frame proof.
+Multi-vector deepfake analysis for investigative journalists. Built for reliability, explainability, and ease of use.
 
-### How Detection Actually Works
-
-Most deepfake detectors fail because they rely on single signals. VERITAS uses multiple independent detection vectors:
-
-**1. Laplacian Variance (Face Texture Analysis)**
-- Real faces have natural texture variation (pores, fine lines, micro-shadows)
-- Deepfakes often produce unnaturally smooth faces
-- We measure texture variance using Laplacian filters
-- Variance < 120 = suspicious smoothness
-
-**2. Boundary Consistency Analysis**
-- When a face is composited onto video, the edges often don't match
-- Color temperature, lighting direction, and skin tone differ at boundaries
-- We compare face region color to surrounding region
-- Large difference = likely composite
-
-**3. Spectral Audio Analysis**
-- Real human speech has rich high-frequency content
-- Voice synthesis often lacks natural high-frequency harmonics
-- We use FFT to analyze frequency distribution
-- Missing high-frequency energy = synthetic voice
-
-**4. Context/Scam Detection**
-- OCR extracts text from video frames
-- Pattern matching for wallet addresses (ETH, BTC)
-- Keyword detection for common scam phrases
-- "Send ETH", "giveaway", "double your crypto" = scam indicators
-
-### Why Most Tools Are Unreliable
-
-Coffeezilla is right - most detection tools ARE unreliable because:
-
-1. **Single-vector detection** - Easy to bypass by improving one aspect
-2. **Training data bias** - Models trained on old deepfakes miss new ones
-3. **Confidence theater** - High percentages with no real basis
-4. **No explainability** - "It's fake" with no proof
-
-VERITAS provides:
-- Multiple independent detection methods
-- Per-frame analysis with visible metrics
-- Specific indicators (texture variance numbers, frequency analysis)
-- Annotated output video showing exactly what triggered detection
-
-### Requirements
-
-**System:**
-- ffmpeg
-- yt-dlp (for URL downloads)
-- tesseract-ocr
-- OpenCV
-
-**Install on Ubuntu/Debian/Kali:**
-```bash
-sudo apt update
-sudo apt install ffmpeg tesseract-ocr libtesseract-dev libopencv-dev clang libclang-dev
-pip install yt-dlp
-```
-
-### Usage
-
-**1. Analyze video:**
-```bash
-cd veritas-core
-cargo build --release
-./target/release/veritas-core "https://youtube.com/watch?v=XXXXX"
-# or local file:
-./target/release/veritas-core /path/to/video.mp4
-```
-
-**2. Generate annotated output:**
-```bash
-cd veritas-viz
-pip install -r requirements.txt
-python heatmap_overlay.py
-```
-
-**3. View results:**
-- `veritas_report.json` - Full analysis report
-- `veritas_output.mp4` - Annotated video with overlays
-
-### Detection Methods
-
-| Method | What It Detects | How |
-|--------|-----------------|-----|
-| Laplacian Variance | Unnaturally smooth faces | Texture analysis via edge detection |
-| Boundary Analysis | Face composite artifacts | Color consistency at face edges |
-| Spectral Analysis | Synthetic voice | FFT frequency distribution |
-| OCR + Keywords | Scam content | Text extraction + pattern matching |
-
-### Output
-
-The annotated video includes:
-- Real-time metrics overlay (top banner)
-- Face detection with per-face analysis
-- Suspicious regions highlighted in red with scan lines
-- Texture variance displayed per face
-- Overall verdict banner (bottom)
-
-### Limitations
-
-This tool is NOT perfect. It CAN:
-- Detect common deepfake artifacts
-- Flag suspicious content for human review
-- Provide evidence for investigation
-
-It CANNOT:
-- Guarantee 100% accuracy
-- Detect highly sophisticated deepfakes
-- Replace human judgment
-
-Use as ONE tool in your investigation toolkit, not as sole evidence.
-
-### For Journalists
-
-When reporting on suspected deepfakes:
-1. Run VERITAS analysis
-2. Document the specific indicators flagged
-3. Cross-reference with other evidence
-4. Contact subjects for verification
-5. Consult with forensic experts
-
-The annotated video can be used to explain to viewers exactly WHY content is suspected to be fake.
+![Version](https://img.shields.io/badge/version-2.0.0-cyan)
+![Python](https://img.shields.io/badge/python-3.8+-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
 
 ---
 
-Built for investigative journalism. Use responsibly.
+## Quick Start
 
-Contact: @CtrlAlt8080
+```bash
+# 1. Install (one time)
+chmod +x install.sh
+./install.sh
+
+# 2. Analyze a video
+./run.sh https://youtube.com/watch?v=VIDEO_ID
+# or
+./run.sh suspicious_video.mp4
+
+# 3. Or use the GUI
+./VERITAS.sh
+```
+
+---
+
+## What It Does
+
+VERITAS analyzes videos using **8 independent detection methods**:
+
+| Method | What It Detects | How |
+|--------|-----------------|-----|
+| **Laplacian Variance** | Unnaturally smooth faces | Texture analysis - deepfakes often lack natural skin texture |
+| **Boundary Consistency** | Face composite artifacts | Color/lighting mismatch at face edges |
+| **Spectral Audio** | Synthetic voice | FFT analysis - AI voices lack high-frequency harmonics |
+| **Blink Detection** | Unnatural blink patterns | Deepfakes often don't blink correctly |
+| **Noise Pattern** | GAN fingerprints | AI-generated content has uniform noise |
+| **Entropy Analysis** | Abnormal randomness | Synthetic content has unusual entropy distribution |
+| **Temporal Consistency** | Face position jumps | Faces shouldn't teleport between frames |
+| **OCR + Keywords** | Scam content | Wallet addresses, "giveaway" phrases |
+
+### Why Multiple Methods?
+
+Most deepfake detectors fail because they rely on **single signals** that can be bypassed. VERITAS combines independent methods - even if one fails, others can still detect manipulation.
+
+---
+
+## Output
+
+After analysis, you get:
+
+1. **veritas_report.json** - Machine-readable data with all metrics
+2. **veritas_report.html** - Beautiful shareable report for articles/videos
+3. **veritas_output.mp4** - Annotated video showing what triggered detection
+
+### Confidence Levels
+
+| Score | Meaning |
+|-------|---------|
+| **>75%** | HIGH - Almost certainly fake/manipulated |
+| **50-75%** | MEDIUM - Suspicious, needs human review |
+| **<50%** | LOW - Likely authentic |
+
+---
+
+## Installation
+
+### Automatic (Recommended)
+
+```bash
+chmod +x install.sh
+./install.sh
+```
+
+The installer automatically detects your OS and installs everything needed.
+
+### Manual
+
+**macOS:**
+```bash
+brew install python3 ffmpeg tesseract
+python3 -m venv .venv
+.venv/bin/pip install opencv-python numpy yt-dlp pillow
+```
+
+**Ubuntu/Debian/Kali:**
+```bash
+sudo apt install python3 python3-venv ffmpeg tesseract-ocr libgl1-mesa-glx
+python3 -m venv .venv
+.venv/bin/pip install opencv-python numpy yt-dlp pillow
+```
+
+---
+
+## Usage
+
+### Command Line
+
+```bash
+# Analyze YouTube video
+./run.sh https://youtube.com/watch?v=ABC123
+
+# Analyze local file
+./run.sh /path/to/video.mp4
+
+# Fast analysis (skip video rendering)
+./run.sh video.mp4 --no-video
+
+# JSON only (minimal output)
+./run.sh video.mp4 --json-only
+```
+
+### GUI
+
+```bash
+./VERITAS.sh
+```
+
+Or double-click `VERITAS.sh` in your file manager.
+
+### Python API
+
+```python
+from veritas import analyze
+
+report = analyze("video.mp4", generate_video=True, generate_html=True)
+
+print(f"Confidence: {report.confidence * 100:.0f}%")
+print(f"Verdict: {report.verdict}")
+
+for flag in report.flags:
+    print(f"  ! {flag}")
+```
+
+---
+
+## For Journalists
+
+When reporting on suspected deepfakes:
+
+1. **Run VERITAS** - Get the initial analysis
+2. **Document specific indicators** - Note which methods flagged issues
+3. **Cross-reference** - Compare with known authentic footage
+4. **Verify chain of custody** - Where did the video come from?
+5. **Consult experts** - VERITAS is one tool, not definitive proof
+
+The **HTML report** can be shared with editors or used to explain findings to viewers.
+
+---
+
+## Limitations
+
+VERITAS is a **detection aid**, not a lie detector.
+
+**It CAN:**
+- Detect common deepfake artifacts
+- Flag suspicious content for review
+- Provide evidence for investigation
+- Explain why content was flagged
+
+**It CANNOT:**
+- Guarantee 100% accuracy
+- Detect highly sophisticated deepfakes
+- Replace human judgment
+- Serve as legal proof
+
+Advanced deepfakes (especially those with post-processing) may evade detection. Always use VERITAS as **one tool in your toolkit**, not the only one.
+
+---
+
+## Technical Details
+
+### Detection Thresholds
+
+```python
+THRESHOLDS = {
+    "laplacian_variance": 100,    # Below = suspiciously smooth
+    "boundary_distance": 35,      # Above = color mismatch
+    "high_freq_ratio": 0.03,      # Below = synthetic voice
+    "blink_rate_min": 0.1,        # Below = not blinking enough
+    "blink_rate_max": 0.5,        # Above = blinking too much
+}
+```
+
+### Confidence Calculation
+
+```
+confidence = (
+    visual_score * 0.30 +
+    audio_score * 0.20 +
+    scam_score * 0.20 +
+    entropy_score * 0.10 +
+    blink_score * 0.10 +
+    noise_score * 0.10
+)
+```
+
+Multiple strong signals boost confidence (if 3+ methods flag >50%, confidence is boosted by 20%).
+
+---
+
+## Contributing
+
+Pull requests welcome. Priority areas:
+
+- [ ] Lip sync detection (audio-visual correlation)
+- [ ] Better temporal analysis (optical flow)
+- [ ] Model-based detection (ResNet/EfficientNet)
+- [ ] Windows native support
+- [ ] Batch processing mode
+
+---
+
+## License
+
+MIT - Use freely for journalism, research, and education.
+
+---
+
+## Contact
+
+Questions or feedback: @CtrlAlt8080
+
+---
+
+*Built for investigative journalism. Use responsibly.*
