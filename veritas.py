@@ -32,11 +32,25 @@ from datetime import datetime
 import wave
 import struct
 
+# Optional advanced dependencies
+try:
+    import mediapipe as mp
+    MEDIAPIPE_AVAILABLE = True
+except ImportError:
+    MEDIAPIPE_AVAILABLE = False
+
+try:
+    import librosa
+    from scipy.signal import correlate
+    LIBROSA_AVAILABLE = True
+except ImportError:
+    LIBROSA_AVAILABLE = False
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════════════
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 
 # Detection thresholds (tuned from real deepfake analysis)
 THRESHOLDS = {
@@ -399,9 +413,175 @@ def analyze_noise_patterns(roi) -> float:
     except:
         return 0.0
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# MEDIAPIPE LANDMARK EXTRACTION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Initialize Mediapipe Face Landmarker (lazy loading)
+_face_landmarker = None
+_model_path = None
+
+def get_face_landmarker():
+    """Get or create Mediapipe Face Landmarker instance (new Tasks API)"""
+    global _face_landmarker, _model_path
+    if not MEDIAPIPE_AVAILABLE:
+        return None
+
+    if _face_landmarker is not None:
+        return _face_landmarker
+
+    try:
+        from mediapipe.tasks.python import vision
+        from mediapipe.tasks.python.core import base_options
+
+        # Download model if needed
+        script_dir = Path(__file__).parent
+        model_file = script_dir / "face_landmarker.task"
+
+        if not model_file.exists():
+            print("    Downloading face landmark model...")
+            import urllib.request
+            model_url = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+            urllib.request.urlretrieve(model_url, str(model_file))
+
+        options = vision.FaceLandmarkerOptions(
+            base_options=base_options.BaseOptions(model_asset_path=str(model_file)),
+            output_face_blendshapes=False,
+            output_facial_transformation_matrixes=False,
+            num_faces=1,
+            min_face_detection_confidence=0.5,
+            min_face_presence_confidence=0.5,
+            min_tracking_confidence=0.5
+        )
+
+        _face_landmarker = vision.FaceLandmarker.create_from_options(options)
+        _model_path = str(model_file)
+        return _face_landmarker
+
+    except Exception as e:
+        print(f"    WARNING: Could not initialize FaceLandmarker: {e}")
+        return None
+
+def extract_landmarks(frame: np.ndarray) -> Optional[List[Tuple[float, float, float]]]:
+    """
+    Extract facial landmarks from a frame using Mediapipe Tasks API.
+    Returns: list of (x, y, z) normalized coordinates, or None if no face detected.
+    """
+    landmarker = get_face_landmarker()
+    if landmarker is None:
+        return None
+
+    try:
+        # Convert BGR to RGB
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+        # Create mediapipe Image
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+
+        # Detect landmarks
+        result = landmarker.detect(mp_image)
+
+        if result.face_landmarks and len(result.face_landmarks) > 0:
+            landmarks = result.face_landmarks[0]
+            return [(lm.x, lm.y, lm.z) for lm in landmarks]
+
+    except Exception:
+        pass
+
+    return None
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# EAR-BASED BLINK DETECTION (Mediapipe)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def compute_ear(eye_landmarks: List[Tuple[float, float, float]]) -> float:
+    """
+    Compute Eye Aspect Ratio for blink detection.
+    EAR drops significantly when eye is closed.
+    """
+    try:
+        # Vertical distances
+        v1 = np.linalg.norm(np.array(eye_landmarks[1][:2]) - np.array(eye_landmarks[5][:2]))
+        v2 = np.linalg.norm(np.array(eye_landmarks[2][:2]) - np.array(eye_landmarks[4][:2]))
+        # Horizontal distance
+        h = np.linalg.norm(np.array(eye_landmarks[0][:2]) - np.array(eye_landmarks[3][:2]))
+        if h == 0:
+            return 0.3
+        return (v1 + v2) / (2.0 * h)
+    except:
+        return 0.3
+
+def detect_blinks_mediapipe(landmarks_sequence: List, fps: float = 30,
+                            ear_threshold: float = 0.21, min_blink_frames: int = 2) -> Tuple[float, int, str]:
+    """
+    Analyze blink patterns using Eye Aspect Ratio from Mediapipe landmarks.
+    Returns: (anomaly_score, blink_count, explanation)
+    """
+    if len(landmarks_sequence) < 30:
+        return 0.0, 0, "Insufficient frames for blink analysis"
+
+    # Mediapipe Face Mesh eye landmark indices
+    # Left eye: 33, 160, 158, 133, 153, 144
+    # Right eye: 362, 385, 387, 263, 373, 380
+    left_eye_indices = [33, 160, 158, 133, 153, 144]
+    right_eye_indices = [362, 385, 387, 263, 373, 380]
+
+    ears = []
+    for landmarks in landmarks_sequence:
+        if landmarks and len(landmarks) >= 468:  # Full face mesh has 468 landmarks
+            try:
+                left_eye = [landmarks[i] for i in left_eye_indices]
+                right_eye = [landmarks[i] for i in right_eye_indices]
+                left_ear = compute_ear(left_eye)
+                right_ear = compute_ear(right_eye)
+                ears.append((left_ear + right_ear) / 2.0)
+            except:
+                ears.append(0.3)  # Default open eye
+        else:
+            ears.append(0.3)
+
+    # Count blinks (consecutive low EAR frames)
+    blink_count = 0
+    in_blink = False
+    blink_frames = 0
+
+    for ear in ears:
+        if ear < ear_threshold:
+            blink_frames += 1
+            in_blink = True
+        else:
+            if in_blink and blink_frames >= min_blink_frames:
+                blink_count += 1
+            in_blink = False
+            blink_frames = 0
+
+    # Calculate duration and expected blinks
+    duration = len(landmarks_sequence) / fps
+    # Normal: 15-20 blinks per minute = 0.25-0.33 per second
+    expected_blinks = duration * 0.28  # ~17 blinks/min
+
+    if expected_blinks < 1:
+        return 0.0, blink_count, "Video too short for blink analysis"
+
+    # Calculate deviation from expected
+    deviation = abs(blink_count - expected_blinks) / max(expected_blinks, 1)
+
+    # Score based on deviation
+    if blink_count == 0 and duration > 5:
+        score = 0.9  # No blinks in 5+ seconds is very suspicious
+        explanation = f"No blinks detected in {duration:.1f}s (expected ~{expected_blinks:.0f})"
+    elif deviation > 1.0:
+        score = min(0.8, deviation * 0.4)
+        explanation = f"Abnormal blink rate: {blink_count} blinks in {duration:.1f}s (expected ~{expected_blinks:.0f})"
+    else:
+        score = 0.0
+        explanation = f"Normal blink pattern: {blink_count} blinks in {duration:.1f}s"
+
+    return score, blink_count, explanation
+
 def detect_blinks(video_path: str, sample_frames: int = 200) -> Tuple[float, int]:
     """
-    Detect blink patterns - deepfakes often have unnatural blink rates.
+    Detect blink patterns - uses Mediapipe if available, falls back to Haar cascades.
     Returns (anomaly_score, blink_count)
     """
     cap = cv2.VideoCapture(video_path)
@@ -411,8 +591,32 @@ def detect_blinks(video_path: str, sample_frames: int = 200) -> Tuple[float, int
     fps = cap.get(cv2.CAP_PROP_FPS) or 30
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     duration = total_frames / fps
+    sample_every = max(1, total_frames // sample_frames)
 
-    # Load eye cascade
+    # Try Mediapipe first (more accurate)
+    if MEDIAPIPE_AVAILABLE:
+        landmarks_sequence = []
+        frame_idx = 0
+
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            frame_idx += 1
+            if frame_idx % sample_every != 0:
+                continue
+
+            landmarks = extract_landmarks(frame)
+            landmarks_sequence.append(landmarks)
+
+        cap.release()
+
+        if landmarks_sequence:
+            score, blink_count, _ = detect_blinks_mediapipe(landmarks_sequence, fps)
+            return score, blink_count
+
+    # Fallback to Haar cascade method
+    cap = cv2.VideoCapture(video_path)
     eye_cascade_path = cv2.data.haarcascades + "haarcascade_eye.xml"
     if not Path(eye_cascade_path).exists():
         cap.release()
@@ -425,8 +629,6 @@ def detect_blinks(video_path: str, sample_frames: int = 200) -> Tuple[float, int
         cap.release()
         return 0.0, 0
 
-    sample_every = max(1, total_frames // sample_frames)
-
     eyes_detected_history = []
     frame_idx = 0
 
@@ -434,7 +636,6 @@ def detect_blinks(video_path: str, sample_frames: int = 200) -> Tuple[float, int
         ret, frame = cap.read()
         if not ret:
             break
-
         frame_idx += 1
         if frame_idx % sample_every != 0:
             continue
@@ -452,29 +653,136 @@ def detect_blinks(video_path: str, sample_frames: int = 200) -> Tuple[float, int
     if len(eyes_detected_history) < 10:
         return 0.0, 0
 
-    # Count transitions (eye open -> closed -> open = blink)
     blink_count = 0
     for i in range(1, len(eyes_detected_history)):
         if eyes_detected_history[i-1] and not eyes_detected_history[i]:
             blink_count += 1
 
-    # Normal blink rate: 15-20 per minute = 0.25-0.33 per second
-    # Deepfakes often don't blink at all or blink unnaturally
     blink_rate = blink_count / max(duration, 1)
 
     if blink_rate < THRESHOLDS["blink_rate_min"]:
-        # Not blinking enough - very suspicious
         return 0.8, blink_count
     elif blink_rate > THRESHOLDS["blink_rate_max"]:
-        # Blinking too much - somewhat suspicious
         return 0.4, blink_count
 
     return 0.0, blink_count
 
-def analyze_visual(video_path: str) -> Tuple[float, float, float, float, List[FaceAnalysis]]:
+# ═══════════════════════════════════════════════════════════════════════════════
+# LIP-SYNC DETECTION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def compute_mar(landmarks: List[Tuple[float, float, float]]) -> float:
+    """
+    Compute Mouth Aspect Ratio - indicates how open the mouth is.
+    """
+    try:
+        # Inner lip landmarks (Mediapipe indices)
+        # Top inner: 13, Bottom inner: 14, Left corner: 78, Right corner: 308
+        top = np.array(landmarks[13][:2])
+        bottom = np.array(landmarks[14][:2])
+        left = np.array(landmarks[78][:2])
+        right = np.array(landmarks[308][:2])
+
+        vertical = np.linalg.norm(top - bottom)
+        horizontal = np.linalg.norm(left - right)
+
+        if horizontal == 0:
+            return 0.0
+        return vertical / horizontal
+    except:
+        return 0.0
+
+def detect_lip_sync(video_path: str, audio_path: str,
+                    landmarks_sequence: List, fps: float = 30) -> Tuple[float, str]:
+    """
+    Detect audio-visual lip sync anomalies.
+    Compares mouth opening patterns with audio amplitude envelope.
+    Returns: (desync_score, explanation)
+    """
+    if not LIBROSA_AVAILABLE:
+        return 0.0, "Librosa not available for lip-sync analysis"
+
+    if audio_path is None or not Path(audio_path).exists():
+        return 0.0, "No audio track for lip-sync analysis"
+
+    if len(landmarks_sequence) < 30:
+        return 0.0, "Insufficient frames for lip-sync analysis"
+
+    try:
+        # Load audio and compute onset envelope
+        y, sr = librosa.load(audio_path, sr=None, duration=60)  # Max 60 seconds
+
+        # Get onset strength (audio energy envelope)
+        onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+
+        # Resample to match video frames
+        target_len = len(landmarks_sequence)
+        if len(onset_env) > 0:
+            onset_env_resampled = np.interp(
+                np.linspace(0, len(onset_env) - 1, target_len),
+                np.arange(len(onset_env)),
+                onset_env
+            )
+        else:
+            return 0.0, "No audio onset detected"
+
+        # Compute MAR sequence
+        mar_sequence = []
+        for landmarks in landmarks_sequence:
+            if landmarks and len(landmarks) >= 468:
+                mar = compute_mar(landmarks)
+                mar_sequence.append(mar)
+            else:
+                mar_sequence.append(0.0)
+
+        mar_sequence = np.array(mar_sequence)
+
+        # Check if there's enough variation in mouth movement
+        if np.std(mar_sequence) < 0.01:
+            # Mouth barely moving but audio present
+            if np.std(onset_env_resampled) > 0.1:
+                return 0.7, "Mouth static despite audio activity"
+            return 0.0, "Both mouth and audio static"
+
+        # Check if there's audio
+        if np.std(onset_env_resampled) < 0.01:
+            return 0.0, "No significant audio for lip-sync comparison"
+
+        # Normalize both signals
+        mar_norm = (mar_sequence - np.mean(mar_sequence)) / (np.std(mar_sequence) + 1e-10)
+        audio_norm = (onset_env_resampled - np.mean(onset_env_resampled)) / (np.std(onset_env_resampled) + 1e-10)
+
+        # Cross-correlation
+        correlation = correlate(mar_norm, audio_norm, mode='full')
+        max_corr = np.max(np.abs(correlation)) / len(mar_norm)
+
+        # Find lag at max correlation
+        lag = np.argmax(np.abs(correlation)) - len(mar_norm)
+        lag_seconds = abs(lag) / fps
+
+        # Score based on correlation and lag
+        if max_corr < 0.1:
+            score = 0.8
+            explanation = f"Very poor lip-audio correlation ({max_corr:.2f})"
+        elif max_corr < 0.2:
+            score = 0.5
+            explanation = f"Weak lip-audio correlation ({max_corr:.2f})"
+        elif lag_seconds > 0.3:
+            score = 0.6
+            explanation = f"Lip-sync lag detected ({lag_seconds:.2f}s)"
+        else:
+            score = max(0.0, 0.3 - max_corr)  # Higher correlation = lower score
+            explanation = f"Lip-sync correlation: {max_corr:.2f}"
+
+        return score, explanation
+
+    except Exception as e:
+        return 0.0, f"Lip-sync analysis failed: {str(e)[:50]}"
+
+def analyze_visual(video_path: str, collect_landmarks: bool = True) -> Tuple[float, float, float, float, List[FaceAnalysis], List]:
     """
     Comprehensive visual analysis.
-    Returns: (manipulation_score, temporal_score, entropy_score, noise_score, face_details)
+    Returns: (manipulation_score, temporal_score, entropy_score, noise_score, face_details, landmarks_sequence)
     """
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -495,6 +803,7 @@ def analyze_visual(video_path: str) -> Tuple[float, float, float, float, List[Fa
     face_details = []
     entropy_values = []
     noise_scores = []
+    landmarks_sequence = []  # For lip-sync analysis
 
     # For temporal analysis
     prev_face_positions = []
@@ -515,6 +824,11 @@ def analyze_visual(video_path: str) -> Tuple[float, float, float, float, List[Fa
         processed += 1
         progress = int(100 * processed / (frame_count / sample_every + 1))
         reporter.update("visual", min(progress, 99), f"Analyzing frame {frame_idx}/{frame_count}")
+
+        # Extract landmarks for lip-sync analysis
+        if collect_landmarks and MEDIAPIPE_AVAILABLE:
+            landmarks = extract_landmarks(frame)
+            landmarks_sequence.append(landmarks)
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         faces = face_cascade.detectMultiScale(gray, 1.1, 4, minSize=(40, 40))
@@ -580,7 +894,7 @@ def analyze_visual(video_path: str) -> Tuple[float, float, float, float, List[Fa
 
     if total_faces == 0:
         print("    Note: No faces detected in video")
-        return 0.0, 0.0, 0.0, 0.0, []
+        return 0.0, 0.0, 0.0, 0.0, [], landmarks_sequence
 
     # Calculate scores
     visual_score = suspicious_faces / total_faces
@@ -598,7 +912,7 @@ def analyze_visual(video_path: str) -> Tuple[float, float, float, float, List[Fa
     print(f"    Analyzed {total_faces} faces across {processed} frames")
     print(f"    Suspicious: {suspicious_faces} ({visual_score*100:.1f}%)")
 
-    return visual_score, temporal_score, entropy_score, noise_score, face_details
+    return visual_score, temporal_score, entropy_score, noise_score, face_details, landmarks_sequence
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # AUDIO ANALYSIS
@@ -862,10 +1176,10 @@ def generate_annotated_video(video_path: str, report: VeritasReport, output_path
         y = 55
         metrics_display = [
             ("Visual", metrics.visual_manipulation),
+            ("LipSync", metrics.lip_sync_anomaly),
             ("Audio", metrics.audio_artifacts),
-            ("Scam", metrics.scam_indicators),
             ("Blink", metrics.blink_anomaly),
-            ("Noise", metrics.noise_pattern_anomaly),
+            ("Scam", metrics.scam_indicators),
         ]
 
         for i, (name, val) in enumerate(metrics_display):
@@ -1084,6 +1398,10 @@ def generate_html_report(report: VeritasReport, output_path: str = "veritas_repo
                 <span class="metric-value">{report.metrics.audio_artifacts*100:.1f}%</span>
             </div>
             <div class="metric-row">
+                <span class="metric-name">Lip-Sync Anomaly</span>
+                <span class="metric-value">{report.metrics.lip_sync_anomaly*100:.1f}%</span>
+            </div>
+            <div class="metric-row">
                 <span class="metric-name">Scam Indicators</span>
                 <span class="metric-value">{report.metrics.scam_indicators*100:.1f}%</span>
             </div>
@@ -1161,9 +1479,9 @@ def analyze(target: str, generate_video: bool = True, generate_html: bool = True
     duration = frame_count / fps
     cap.release()
 
-    # 2. Visual analysis
+    # 2. Visual analysis (also collects landmarks for lip-sync)
     reporter.phase("Analyzing visual content...")
-    visual_score, temporal_score, entropy_score, noise_score, face_details = analyze_visual(video_path)
+    visual_score, temporal_score, entropy_score, noise_score, face_details, landmarks_sequence = analyze_visual(video_path)
 
     if visual_score > 0.3:
         signals.append({
@@ -1208,12 +1526,43 @@ def analyze(target: str, generate_video: bool = True, generate_html: bool = True
         signals.append({
             "name": "Audio Synthesis Markers",
             "score": audio_score,
-            "weight": 0.2,
+            "weight": 0.15,
             "evidence": "; ".join(audio_evidence) if audio_evidence else "Spectral anomalies detected",
             "technical": "Missing high-frequency harmonics typical of voice synthesis"
         })
 
-    # 5. Context analysis
+    # 5. Lip-sync analysis
+    reporter.phase("Analyzing lip-sync...")
+    lip_sync_score = 0.0
+    lip_sync_explanation = "Lip-sync analysis not available"
+
+    if MEDIAPIPE_AVAILABLE and LIBROSA_AVAILABLE and audio_path and landmarks_sequence:
+        lip_sync_score, lip_sync_explanation = safe_execute(
+            lambda: detect_lip_sync(video_path, audio_path, landmarks_sequence, fps),
+            fallback=(0.0, "Lip-sync analysis failed"),
+            error_msg="Lip-sync detection failed"
+        )
+        print(f"    {lip_sync_explanation}")
+    elif not MEDIAPIPE_AVAILABLE:
+        print("    Mediapipe not available - skipping lip-sync")
+    elif not LIBROSA_AVAILABLE:
+        print("    Librosa not available - skipping lip-sync")
+    elif not audio_path:
+        print("    No audio track - skipping lip-sync")
+    else:
+        print("    No landmarks collected - skipping lip-sync")
+
+    if lip_sync_score > 0.3:
+        signals.append({
+            "name": "Lip-Sync Anomaly",
+            "score": lip_sync_score,
+            "weight": 0.20,
+            "evidence": lip_sync_explanation,
+            "technical": "Audio-visual mouth movement correlation analysis"
+        })
+        flags.append(f"Lip-sync issue: {lip_sync_explanation}")
+
+    # 6. Context analysis
     reporter.phase("Scanning for scam indicators...")
     context_score, context_flags = analyze_context(video_path)
     flags.extend(context_flags)
@@ -1227,14 +1576,16 @@ def analyze(target: str, generate_video: bool = True, generate_html: bool = True
             "technical": "OCR detected wallet addresses or scam keywords"
         })
 
-    # 6. Calculate final confidence
+    # 7. Calculate final confidence
+    # Weights: visual 25%, lip-sync 20%, audio 15%, context 15%, blink 10%, entropy 8%, noise 7%
     confidence = (
-        visual_score * 0.30 +
-        audio_score * 0.20 +
-        context_score * 0.20 +
-        entropy_score * 0.10 +
+        visual_score * 0.25 +
+        lip_sync_score * 0.20 +
+        audio_score * 0.15 +
+        context_score * 0.15 +
         blink_score * 0.10 +
-        noise_score * 0.10
+        entropy_score * 0.08 +
+        noise_score * 0.07
     )
 
     # Adjust confidence based on signal agreement
@@ -1263,6 +1614,8 @@ def analyze(target: str, generate_video: bool = True, generate_html: bool = True
         recommendations.append("Verify any wallet addresses shown are not associated with known scams")
     if audio_score > 0.5:
         recommendations.append("Compare voice with known authentic recordings of the speaker")
+    if lip_sync_score > 0.5:
+        recommendations.append("Lip movement does not match audio - possible voice dubbing or face swap")
     if len(recommendations) == 0:
         recommendations.append("No immediate concerns, but always verify before trusting")
 
@@ -1274,7 +1627,7 @@ def analyze(target: str, generate_video: bool = True, generate_html: bool = True
         temporal_inconsistency=temporal_score,
         entropy_anomaly=entropy_score,
         blink_anomaly=blink_score,
-        lip_sync_anomaly=0.0,  # TODO: implement
+        lip_sync_anomaly=lip_sync_score,
         noise_pattern_anomaly=noise_score
     )
 
@@ -1325,6 +1678,7 @@ def analyze(target: str, generate_video: bool = True, generate_html: bool = True
     print("  ANALYSIS COMPLETE")
     print(f"{'='*65}")
     print(f"  Visual Manipulation:  {visual_score*100:5.1f}%")
+    print(f"  Lip-Sync Anomaly:     {lip_sync_score*100:5.1f}%")
     print(f"  Audio Artifacts:      {audio_score*100:5.1f}%")
     print(f"  Scam Indicators:      {context_score*100:5.1f}%")
     print(f"  Blink Anomaly:        {blink_score*100:5.1f}%")

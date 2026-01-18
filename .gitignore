@@ -4,5 +4,8 @@ __pycache__/
 temp_*
 veritas_output.mp4
 veritas_report.json
+veritas_report.html
 test_video.mp4
 veritas-core/target/
+# Mediapipe model (auto-downloaded)
+*.task

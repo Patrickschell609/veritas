@@ -155,7 +155,10 @@ setup_venv() {
         opencv-python \
         numpy \
         yt-dlp \
-        pillow
+        pillow \
+        mediapipe \
+        librosa \
+        scipy
 
     echo -e "${GREEN}[OK]${NC} Python environment ready"
 }
