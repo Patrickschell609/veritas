@@ -4,7 +4,7 @@
 
 Multi-vector deepfake analysis for investigative journalists. Built for reliability, explainability, and ease of use.
 
-![Version](https://img.shields.io/badge/version-2.0.0-cyan)
+![Version](https://img.shields.io/badge/version-2.1.0-cyan)
 ![Python](https://img.shields.io/badge/python-3.8+-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -30,14 +30,15 @@ chmod +x install.sh
 
 ## What It Does
 
-VERITAS analyzes videos using **8 independent detection methods**:
+VERITAS analyzes videos using **9 independent detection methods**:
 
 | Method | What It Detects | How |
 |--------|-----------------|-----|
 | **Laplacian Variance** | Unnaturally smooth faces | Texture analysis - deepfakes often lack natural skin texture |
 | **Boundary Consistency** | Face composite artifacts | Color/lighting mismatch at face edges |
 | **Spectral Audio** | Synthetic voice | FFT analysis - AI voices lack high-frequency harmonics |
-| **Blink Detection** | Unnatural blink patterns | Deepfakes often don't blink correctly |
+| **Lip-Sync Analysis** | Audio-visual mismatch | Correlates mouth movement with audio using Mediapipe landmarks |
+| **Blink Detection (EAR)** | Unnatural blink patterns | Eye Aspect Ratio from 468-point face mesh |
 | **Noise Pattern** | GAN fingerprints | AI-generated content has uniform noise |
 | **Entropy Analysis** | Abnormal randomness | Synthetic content has unusual entropy distribution |
 | **Temporal Consistency** | Face position jumps | Faces shouldn't teleport between frames |
@@ -84,15 +85,17 @@ The installer automatically detects your OS and installs everything needed.
 ```bash
 brew install python3 ffmpeg tesseract
 python3 -m venv .venv
-.venv/bin/pip install opencv-python numpy yt-dlp pillow
+.venv/bin/pip install opencv-python numpy yt-dlp pillow mediapipe librosa scipy
 ```
 
 **Ubuntu/Debian/Kali:**
 ```bash
 sudo apt install python3 python3-venv ffmpeg tesseract-ocr libgl1-mesa-glx
 python3 -m venv .venv
-.venv/bin/pip install opencv-python numpy yt-dlp pillow
+.venv/bin/pip install opencv-python numpy yt-dlp pillow mediapipe librosa scipy
 ```
+
+> **Note:** On first run, VERITAS auto-downloads the Mediapipe face landmark model (~4MB).
 
 ---
 
@@ -183,6 +186,7 @@ THRESHOLDS = {
     "high_freq_ratio": 0.03,      # Below = synthetic voice
     "blink_rate_min": 0.1,        # Below = not blinking enough
     "blink_rate_max": 0.5,        # Above = blinking too much
+    "lip_sync_threshold": 0.3,    # Above = audio-visual desync
 }
 ```
 
@@ -190,12 +194,13 @@ THRESHOLDS = {
 
 ```
 confidence = (
-    visual_score * 0.30 +
-    audio_score * 0.20 +
-    scam_score * 0.20 +
-    entropy_score * 0.10 +
+    visual_score * 0.25 +
+    lip_sync_score * 0.20 +
+    audio_score * 0.15 +
+    scam_score * 0.15 +
     blink_score * 0.10 +
-    noise_score * 0.10
+    entropy_score * 0.08 +
+    noise_score * 0.07
 )
 ```
 
@@ -207,7 +212,7 @@ Multiple strong signals boost confidence (if 3+ methods flag >50%, confidence is
 
 Pull requests welcome. Priority areas:
 
-- [ ] Lip sync detection (audio-visual correlation)
+- [x] ~~Lip sync detection (audio-visual correlation)~~ - Added in v2.1.0
 - [ ] Better temporal analysis (optical flow)
 - [ ] Model-based detection (ResNet/EfficientNet)
 - [ ] Windows native support
